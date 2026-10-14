@@ -8,16 +8,27 @@ export const isDemo = !API_URL;
 
 export class ApiError extends Error {}
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+// Every request has a deadline so a stalled connection becomes a "Try again"
+// prompt instead of an endless spinner.
+async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
     res = await fetch(`${API_URL}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
   } catch {
-    throw new ApiError("Can't reach the server. Check your internet connection.");
+    throw new ApiError(
+      controller.signal.aborted
+        ? "The AI is taking too long to respond. Please try again."
+        : "Can't reach the server. Check your internet connection.",
+    );
+  } finally {
+    clearTimeout(timer);
   }
   const data = (await res.json().catch(() => ({}))) as { error?: string } & T;
   if (!res.ok) throw new ApiError(data.error ?? `Server error (${res.status})`);
@@ -31,7 +42,7 @@ export async function transcribe(base64Wav: string): Promise<string> {
     await wait(700);
     return DEMO_ANSWER;
   }
-  return (await post<{ text: string }>("/api/transcribe", { audio: base64Wav })).text;
+  return (await post<{ text: string }>("/api/transcribe", { audio: base64Wav }, 60_000)).text;
 }
 
 export type NextTurn = { say: string; kind: "question" | "followup" | "closing" };
@@ -43,7 +54,7 @@ export async function nextTurn(
   canFollowUp: boolean,
 ): Promise<NextTurn> {
   if (isDemo) return demoTurn(setup, history, mainAsked, canFollowUp);
-  return post<NextTurn>("/api/turn", { ...setup, history: plainTurns(history), mainAsked, canFollowUp });
+  return post<NextTurn>("/api/turn", { ...setup, history: plainTurns(history), mainAsked, canFollowUp }, 45_000);
 }
 
 export async function getReport(setup: Setup, history: Turn[], metrics: string): Promise<Report> {
@@ -51,7 +62,7 @@ export async function getReport(setup: Setup, history: Turn[], metrics: string):
     await wait(1200);
     return demoReport(history);
   }
-  const report = await post<Report>("/api/report", { ...setup, history: plainTurns(history), metrics });
+  const report = await post<Report>("/api/report", { ...setup, history: plainTurns(history), metrics }, 120_000);
   return normalizeReport(report);
 }
 

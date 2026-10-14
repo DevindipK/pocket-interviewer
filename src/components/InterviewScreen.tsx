@@ -31,6 +31,7 @@ export default function InterviewScreen({ setup, onQuit, onFinish }: Props) {
   const retry = useRef<() => void>(() => {});
   const recorder = useRef<WavRecorder | null>(null);
   const started = useRef(false);
+  const finishing = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const push = (turn: Turn) => {
@@ -44,13 +45,18 @@ export default function InterviewScreen({ setup, onQuit, onFinish }: Props) {
     setPhase("error");
   };
 
-  const finish = useCallback(async () => {
+  // The report request starts immediately; the closing line (if any) plays at
+  // the same time instead of blocking it.
+  const finish = useCallback(async (closingLine?: string) => {
+    if (finishing.current) return;
+    finishing.current = true;
     setPhase("reporting");
-    stopSpeaking();
+    const speech = closingLine && voiceRef.current ? speak(closingLine) : (stopSpeaking(), Promise.resolve());
     const history = turnsRef.current;
     const delivery = measureDelivery(history);
     try {
       const report = await getReport(setup, history, describeDelivery(delivery));
+      await speech;
       const session: Session = {
         id: crypto.randomUUID?.() ?? String(Date.now()),
         date: new Date().toISOString(),
@@ -63,6 +69,7 @@ export default function InterviewScreen({ setup, onQuit, onFinish }: Props) {
       saveSession(session);
       onFinish(session);
     } catch (err) {
+      finishing.current = false;
       fail(err, () => void finish());
     }
   }, [setup, onFinish]);
@@ -89,12 +96,16 @@ export default function InterviewScreen({ setup, onQuit, onFinish }: Props) {
       }
       push({ speaker: "interviewer", text: reply.say, kind });
 
+      if (kind === "closing") {
+        void finish(reply.say);
+        return;
+      }
       if (voiceRef.current) {
         setPhase("speaking");
         await speak(reply.say);
       }
-      if (kind === "closing") void finish();
-      else setPhase("ready");
+      // The user may have tapped the mic mid-question; don't clobber that.
+      setPhase((p) => (p === "speaking" ? "ready" : p));
     } catch (err) {
       fail(err, () => void askNext());
     }
